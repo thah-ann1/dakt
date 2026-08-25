@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<title>Dashboard Nhà Kính Trồng Rau Thông Minh</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --accent: #22c55e;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --danger: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", Arial, sans-serif;
+    padding: 24px;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 20px; font-size: 14px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 16px 18px;
+    border: 1px solid #334155;
+  }
+  .card .label { color: var(--muted); font-size: 13px; }
+  .card .value { font-size: 28px; font-weight: 700; margin-top: 6px; }
+  .card .unit { font-size: 14px; color: var(--muted); }
+  .chart-box {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 16px;
+    border: 1px solid #334155;
+    margin-bottom: 24px;
+  }
+  .controls {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  .device-card {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 14px 18px;
+    border: 1px solid #334155;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  button {
+    border: none;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-on { background: var(--accent); color: #052e12; }
+  .btn-off { background: #475569; color: white; }
+  .status-dot {
+    width: 10px; height: 10px; border-radius: 50%; background: var(--muted);
+  }
+  .status-dot.online { background: var(--accent); }
+  #lastUpdate { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>🌱 Dashboard Nhà Kính Trồng Rau Thông Minh</h1>
+<div class="subtitle">
+  <span class="status-dot" id="statusDot"></span>
+  Cập nhật lần cuối: <span id="lastUpdate">--</span>
+</div>
+
+<div class="grid">
+  <div class="card"><div class="label">Nhiệt độ</div><div class="value" id="valTemp">--<span class="unit"> °C</span></div></div>
+  <div class="card"><div class="label">Độ ẩm không khí</div><div class="value" id="valHum">--<span class="unit"> %</span></div></div>
+  <div class="card"><div class="label">Độ ẩm đất</div><div class="value" id="valSoil">--<span class="unit"> %</span></div></div>
+  <div class="card"><div class="label">Ánh sáng</div><div class="value" id="valLux">--<span class="unit"> lux</span></div></div>
+</div>
+
+<div class="chart-box">
+  <canvas id="historyChart" height="90"></canvas>
+</div>
+
+<h3>Điều khiển thiết bị</h3>
+<div class="controls">
+  <div class="device-card">💧 Máy bơm
+    <button class="btn-on" onclick="control('pump','ON')">Bật</button>
+    <button class="btn-off" onclick="control('pump','OFF')">Tắt</button>
+  </div>
+  <div class="device-card">🌀 Quạt
+    <button class="btn-on" onclick="control('fan','ON')">Bật</button>
+    <button class="btn-off" onclick="control('fan','OFF')">Tắt</button>
+  </div>
+  <div class="device-card">💡 Đèn LED
+    <button class="btn-on" onclick="control('lamp','ON')">Bật</button>
+    <button class="btn-off" onclick="control('lamp','OFF')">Tắt</button>
+  </div>
+  <div class="device-card">🌫️ Phun sương
+    <button class="btn-on" onclick="control('mist','ON')">Bật</button>
+    <button class="btn-off" onclick="control('mist','OFF')">Tắt</button>
+  </div>
+</div>
+
+<script>
+const API = ""; // cùng origin với backend (đã mount static tại "/")
+let chart;
+
+function initChart() {
+  const ctx = document.getElementById('historyChart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        { label: 'Nhiệt độ (°C)', data: [], borderColor: '#f97316', tension: 0.3 },
+        { label: 'Độ ẩm KK (%)', data: [], borderColor: '#38bdf8', tension: 0.3 },
+        { label: 'Độ ẩm đất (%)', data: [], borderColor: '#22c55e', tension: 0.3 },
+      ]
+    },
+    options: {
+      responsive: true,
+      scales: { y: { beginAtZero: true } },
+      plugins: { legend: { labels: { color: '#e2e8f0' } } }
+    }
+  });
+}
+
+async function fetchLatest() {
+  try {
+    const res = await fetch(`${API}/api/v1/sensors/latest`);
+    if (!res.ok) throw new Error("no data");
+    const json = await res.json();
+    const d = json.data;
+    document.getElementById('valTemp').firstChild.textContent = d.temp ?? '--';
+    document.getElementById('valHum').firstChild.textContent = d.hum ?? '--';
+    document.getElementById('valSoil').firstChild.textContent = d.soil ?? '--';
+    document.getElementById('valLux').firstChild.textContent = d.lux ?? '--';
+    document.getElementById('lastUpdate').textContent = d.received_at ?? '--';
+    document.getElementById('statusDot').classList.add('online');
+  } catch (e) {
+    document.getElementById('statusDot').classList.remove('online');
+  }
+}
+
+async function fetchHistory() {
+  try {
+    const res = await fetch(`${API}/api/v1/sensors/history/cache?limit=30`);
+    const json = await res.json();
+    const rows = json.data || [];
+    chart.data.labels = rows.map(r => r.received_at ? r.received_at.split(' ')[1] : '');
+    chart.data.datasets[0].data = rows.map(r => r.temp);
+    chart.data.datasets[1].data = rows.map(r => r.hum);
+    chart.data.datasets[2].data = rows.map(r => r.soil);
+    chart.update();
+  } catch (e) { /* im lặng nếu chưa có dữ liệu */ }
+}
+
+async function control(device, action) {
+  await fetch(`${API}/api/v1/actuators/control`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device, action })
+  });
+}
+
+initChart();
+fetchLatest();
+fetchHistory();
+setInterval(fetchLatest, 3000);
+setInterval(fetchHistory, 5000);
+</script>
+</body>
+</html>
