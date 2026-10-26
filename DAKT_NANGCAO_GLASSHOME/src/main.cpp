@@ -204,38 +204,16 @@ void applyAutoLogic() {
     co2_fan_status = "DUNG";
   }
   if (prev != co2_fan_status) lastRelayChangeMs = millis();
-// 1 mo, -1 dong, 0 dung
-  int roof_cmd = 0;
-  if      (t_k >= 32.0f)                       roof_cmd = -1;
-  else if (h_k < 80.0f && t_k >= 25.0f)        roof_cmd =  1;
-  else if (light_raw == LOW)                   roof_cmd =  -1;
-  else if (light_raw == HIGH)                  roof_cmd =  1;
-  else                                         roof_cmd =  0;
-
-  if (roof_cmd == 1) {
-    if (sw1_val == HIGH) {
-      digitalWrite(ROOF_IN3, HIGH); digitalWrite(ROOF_IN4, LOW);
-      roof_status = "MO";
-    } else {
-      digitalWrite(ROOF_IN3, LOW);  digitalWrite(ROOF_IN4, LOW);
-      roof_status = "DA MO";
-    }
+// 10 mở,01 đóng
+// Mai che theo LDR + cong tac hanh trinh
+  prev = roof_status;
+  if (light_raw == LOW) { // SANG -> mo mai
+    if (sw1_val == HIGH) { digitalWrite(ROOF_IN3, HIGH); digitalWrite(ROOF_IN4, LOW);  roof_status = "MO";    }
+    else                 { digitalWrite(ROOF_IN3, LOW);  digitalWrite(ROOF_IN4, LOW);  roof_status = "DA MO"; }
+  } else {                // TOI -> dong mai
+    if (sw2_val == HIGH) { digitalWrite(ROOF_IN3, LOW);  digitalWrite(ROOF_IN4, HIGH); roof_status = "DONG";    }
+    else                 { digitalWrite(ROOF_IN3, LOW);  digitalWrite(ROOF_IN4, LOW);  roof_status = "DA DONG"; }
   }
-  else if (roof_cmd == -1) {
-    if (sw2_val == HIGH) {
-      digitalWrite(ROOF_IN3, LOW);  digitalWrite(ROOF_IN4, HIGH);
-      roof_status = "DONG";
-    } else {
-      digitalWrite(ROOF_IN3, LOW);  digitalWrite(ROOF_IN4, LOW);
-      roof_status = "DA DONG";
-    }
-  }
-  else {
-    digitalWrite(ROOF_IN3, LOW); digitalWrite(ROOF_IN4, LOW);
-    if      (roof_status == "MO")   roof_status = "DUNG";
-    else if (roof_status == "DONG") roof_status = "DUNG";
-  }
-
   if (prev != roof_status) lastRelayChangeMs = millis();
 }
 
