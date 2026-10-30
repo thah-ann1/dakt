@@ -9,7 +9,7 @@
 #include "config.h"
 #include "web_page.h"
 
-// ===== KHAI BAO CHAN PHAN CUNG =====
+// ===== KHAI BÁO CHÂN PHẦN CỨNG =====
 #define DHTPIN 4
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
@@ -27,13 +27,11 @@ DHT dht(DHTPIN, DHTTYPE);
 #define LIMIT_SW_2_PIN   26
 #define MHZ19_PWM_PIN    16
 
-// === CẢM BIẾN MỚI ===
+// === CẢM BIẾN ĐẤT VÀ PHAO TỪ ===
 #define SOIL_PIN         34   // Chân Analog đọc độ ẩm đất
-#define FLOAT_PIN        35   // Chân Digital đọc phao từ (Nối COM với GND, NO với GPIO 35)
+#define FLOAT_PIN        33   // Chân Digital đọc phao từ (Nối COM với GND, NO với GPIO 33)
 
-// Hiệu chuẩn cảm biến đất (BẠN CẦN CHỈNH 2 SỐ NÀY THEO THỰC TẾ)
-// Đất khô hoàn toàn -> Đo được số lớn (VD 3500)
-// Đất ngập nước -> Đo được số nhỏ (VD 1200)
+// Hiệu chuẩn cảm biến đất
 #define SOIL_DRY_VAL     3500
 #define SOIL_WET_VAL     1200
 
@@ -44,7 +42,7 @@ volatile int  g_cachedClients      = 1;
 unsigned long g_lastClientRefresh  = 0;
 const unsigned long CLIENT_REFRESH_MS = 5000UL;
 
-const TickType_t MUTEX_TIMEOUT = pdMS_TO_TICKS(300);
+const TickType_t MUTEX_TIMEOUT = pdMS_TO_TICKS(150); // Giảm timeout để luồng chạy mượt hơn
 
 WebServer server(80);
 SemaphoreHandle_t stateMutex;
@@ -72,39 +70,12 @@ void IRAM_ATTR pwmISR() {
 volatile unsigned long lastRelayChangeMs = 0;
 const    unsigned long CO2_FREEZE_MS     = 300;
 
-class CO2MedianFilter {
-private:
-  long buf[3]; int count; long lastAccepted; bool initialized;
-public:
-  CO2MedianFilter() : count(0), lastAccepted(400), initialized(false) {}
-  long push(long ppm) {
-    if (ppm < 0)    ppm = 0;
-    if (ppm > 5000) ppm = 5000;
-    if (initialized) {
-      long d = ppm - lastAccepted;
-      if (d < 0) d = -d;
-      if (d > 400) return -1;
-    }
-    buf[0] = buf[1]; buf[1] = buf[2]; buf[2] = ppm;
-    if (count < 3) count++;
-    long med;
-    if (count < 3) med = ppm;
-    else {
-      long a = buf[0], b = buf[1], c = buf[2];
-      if ((a <= b && b <= c) || (c <= b && b <= a))      med = b;
-      else if ((b <= a && a <= c) || (c <= a && a <= b)) med = a;
-      else                                                med = c;
-    }
-    lastAccepted = med; initialized = true; return med;
-  }
-};
-CO2MedianFilter co2Filter;
-
+// ===== KALMAN FILTER TỐC ĐỘ CAO =====
 class KalmanFilter {
 private:
   float _q, _r, _x, _p, _k; bool _initialized;
 public:
-  KalmanFilter(float q = 0.05, float r = 1.0, float p = 1.0, float init = 0.0)
+  KalmanFilter(float q, float r, float p, float init)
     : _q(q), _r(r), _p(p), _x(init), _k(0.0), _initialized(false) {}
   float update(float m) {
     if (!_initialized) { _x = m; _initialized = true; return _x; }
@@ -114,18 +85,21 @@ public:
     return _x;
   }
 };
-KalmanFilter kalmanTemp(0.4, 1.0, 1.0, 22.0);
-KalmanFilter kalmanHum (0.4, 2.0, 1.0, 70.0);   // Độ ẩm không khí
 
-KalmanFilter kalmanCO2 (6.0,  5.0, 10.0, 400.0);
+// Đã tinh chỉnh lại hệ số Q rất cao, R rất thấp để cập nhật giá trị TỨC THỜI
+KalmanFilter kalmanTemp(2.0, 0.5, 1.0, 22.0); 
+KalmanFilter kalmanHum (2.0, 0.5, 1.0, 70.0);
+KalmanFilter kalmanCO2 (10.0, 1.0, 1.0, 400.0);
+KalmanFilter kalmanSoil(8.0, 0.1, 1.0, 50.0); // Siêu nhạy với biến động của nước
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
-// ===== BIEN TOAN CUC =====
-float  t_k = 22.0, co2_k = 400.0;
-float  hum_k = 70.0;            // Độ ẩm không khí (%RH)
-float  soil_pct = 0.0;          // Độ ẩm đất (%)
-bool   tank_has_water = true;   // Trạng thái bể nước (true = Còn nước)
+// ===== BIẾN TOÀN CỤC =====
+float  t_k = 22.0;
+float  hum_k = 70.0;
+float  co2_k = 400.0;
+float  soil_pct = 50.0;
+bool   tank_has_water = true;
 
 int    light_raw    = 1;
 String light_status = "TOI";
@@ -138,9 +112,7 @@ String co2_fan_status = "DUNG";
 String roof_status    = "DUNG";
 
 struct SharedSnapshot {
-  float t, co2;
-  float hum;
-  float soil_pct;
+  float t, hum, co2, soil_pct;
   bool  tank_water;
   int   light_raw;
   String light_status;
@@ -186,86 +158,84 @@ long readCO2PWM() {
   newCO2Data = false;
   interrupts();
   float t_ms = t / 1000.0f;
-  long  ppm  = (long)((t_ms - 2.0) * 5.0);
+  long  ppm  = (long)((t_ms - 2.0) * 2.0);
   if (ppm < 0)    ppm = 0;
   if (ppm > 5000) ppm = 5000;
   return ppm;
 }
 
-// ===== LOGIC TU DONG =====
+// ===== LOGIC TỰ ĐỘNG =====
 void applyAutoLogic() {
   int sw1_val = digitalRead(LIMIT_SW_1_PIN);
   int sw2_val = digitalRead(LIMIT_SW_2_PIN);
   String prev;
 
-  // BƠM (độ ẩm đất rau cải 70-85%): bật khi <70%, tắt khi >=85%, giữa 2 ngưỡng giữ nguyên.
-  // Hết nước trong bể -> luôn tắt để bảo vệ bơm.
+  // 1. MÁY BƠM
   prev = pump_status;
   if (!tank_has_water) {
     digitalWrite(PUMP_PIN, HIGH); pump_status = "OFF";
-  } else if (soil_pct < SOIL_PUMP_ON) {
-    digitalWrite(PUMP_PIN, LOW);  pump_status = "ON";
-  } else if (soil_pct >= SOIL_PUMP_OFF) {
+  } else if (soil_pct > 85.0) {
     digitalWrite(PUMP_PIN, HIGH); pump_status = "OFF";
+  } else if (soil_pct < 70.0) {
+    digitalWrite(PUMP_PIN, LOW);  pump_status = "ON";
   }
   if (prev != pump_status) lastRelayChangeMs = millis();
 
-  // SƯỞI (nhiệt độ tối ưu 18-23°C): bật khi <18, tắt khi >=20
+  // 2. ĐÈN SƯỞI
   prev = heat_status;
-  if      (t_k < TEMP_HEAT_ON)   { digitalWrite(HEATER_PIN, LOW);  heat_status = "ON";  }
-  else if (t_k >= TEMP_HEAT_OFF) { digitalWrite(HEATER_PIN, HIGH); heat_status = "OFF"; }
+  if (light_raw == HIGH) { 
+    digitalWrite(HEATER_PIN, LOW);  heat_status = "ON";
+  } else {                 
+    digitalWrite(HEATER_PIN, HIGH); heat_status = "OFF";
+  }
   if (prev != heat_status) lastRelayChangeMs = millis();
 
-  // QUẠT HÚT ẨM / LÀM MÁT: bật khi ẩm không khí > 80% HOẶC nhiệt độ > 25°C
-  //                         tắt khi ẩm <= 75% VÀ nhiệt độ <= 23°C
+  // 3. QUẠT HÚT ẨM
   prev = hum_fan_status;
-  if (hum_k > AIR_HUM_FAN_ON || t_k > TEMP_COOL_ON) {
-    digitalWrite(HUM_FAN_PIN, LOW);  hum_fan_status = "ON";
-  } else if (hum_k <= AIR_HUM_FAN_OFF && t_k <= TEMP_COOL_OFF) {
-    digitalWrite(HUM_FAN_PIN, HIGH); hum_fan_status = "OFF";
+  if (hum_k > 85.0 || t_k > 30.0) { 
+    digitalWrite(HUM_FAN_PIN, LOW);  hum_fan_status = "ON";  
+  }
+  else if (hum_k <= 75.0 && t_k <= 25.0) { 
+    digitalWrite(HUM_FAN_PIN, HIGH); hum_fan_status = "OFF"; 
   }
   if (prev != hum_fan_status) lastRelayChangeMs = millis();
 
-  // QUẠT CO2 (tối ưu 700-1000 ppm): <700 -> VÀO, >1000 -> RA, có độ trễ 50 ppm
+  // 4. QUẠT CO2
   prev = co2_fan_status;
-  if (co2_k > CO2_HIGH_ON) {
-    digitalWrite(CO2_FAN_IN1, LOW);  digitalWrite(CO2_FAN_IN2, HIGH);
-    co2_fan_status = "RA";
-  } else if (co2_k < CO2_LOW_ON) {
+  if (co2_k < 700) {
     digitalWrite(CO2_FAN_IN1, HIGH); digitalWrite(CO2_FAN_IN2, LOW);
     co2_fan_status = "VAO";
-  } else if ((co2_fan_status == "VAO" && co2_k >= CO2_LOW_OFF) ||
-             (co2_fan_status == "RA"  && co2_k <= CO2_HIGH_OFF)) {
+  } else if (co2_k > 1000) {
+    digitalWrite(CO2_FAN_IN1, LOW);  digitalWrite(CO2_FAN_IN2, HIGH);
+    co2_fan_status = "RA";
+  } else {
     digitalWrite(CO2_FAN_IN1, LOW);  digitalWrite(CO2_FAN_IN2, LOW);
     co2_fan_status = "DUNG";
   }
   if (prev != co2_fan_status) lastRelayChangeMs = millis();
 
-  // MÁI CHE: 1 mở, -1 đóng, 0 dừng
-  // Rau cải ưa sáng trung bình: nóng (>=28°C) -> đóng che bớt nắng;
-  // sáng + mát (<=23°C) -> mở đón sáng; tối + không nóng -> đóng giữ ấm.
-  prev = roof_status;
+  // 5. MÁI CHE
   int roof_cmd = 0;
-  if      (t_k >= TEMP_ROOF_HOT)                          roof_cmd = -1;
-  else if (light_raw == LOW  && t_k <= TEMP_ROOF_COOL)    roof_cmd =  1;
-  else if (light_raw == HIGH && t_k <= TEMP_COOL_ON)      roof_cmd = -1;
-  else                                                    roof_cmd =  0;
+  if      (t_k >= 32.0f)                       roof_cmd = -1; 
+  else if (light_raw == LOW && t_k <= 25.0f)   roof_cmd =  1; 
+  else if (light_raw == HIGH)                  roof_cmd = -1; 
+  else                                         roof_cmd =  0;
 
-  if (roof_cmd == 1) {
+  if (roof_cmd == 1) { 
     if (sw1_val == HIGH) {
       digitalWrite(ROOF_IN3, HIGH); digitalWrite(ROOF_IN4, LOW); roof_status = "MO";
     } else {
       digitalWrite(ROOF_IN3, LOW);  digitalWrite(ROOF_IN4, LOW); roof_status = "DA MO";
     }
   }
-  else if (roof_cmd == -1) {
+  else if (roof_cmd == -1) { 
     if (sw2_val == HIGH) {
       digitalWrite(ROOF_IN3, LOW);  digitalWrite(ROOF_IN4, HIGH); roof_status = "DONG";
     } else {
       digitalWrite(ROOF_IN3, LOW);  digitalWrite(ROOF_IN4, LOW); roof_status = "DA DONG";
     }
   }
-  else {
+  else { 
     digitalWrite(ROOF_IN3, LOW); digitalWrite(ROOF_IN4, LOW);
     if      (roof_status == "MO")   roof_status = "DUNG";
     else if (roof_status == "DONG") roof_status = "DUNG";
@@ -273,10 +243,11 @@ void applyAutoLogic() {
   if (prev != roof_status) lastRelayChangeMs = millis();
 }
 
+// ===== SNAPSHOT =====
 void updateSnapshot() {
   g_snap.t              = t_k;
-  g_snap.co2            = co2_k;
   g_snap.hum            = hum_k;
+  g_snap.co2            = co2_k;
   g_snap.soil_pct       = soil_pct;
   g_snap.tank_water     = tank_has_water;
   g_snap.light_raw      = light_raw;
@@ -292,6 +263,7 @@ void updateSnapshot() {
   g_snap.valid          = true;
 }
 
+// ===== SETUP =====
 void setup() {
   Serial.begin(115200);
   delay(300);
@@ -299,6 +271,7 @@ void setup() {
   pinMode(PUMP_PIN,     OUTPUT); digitalWrite(PUMP_PIN, HIGH);
   pinMode(HEATER_PIN,   OUTPUT); digitalWrite(HEATER_PIN, HIGH);
   pinMode(HUM_FAN_PIN,  OUTPUT); digitalWrite(HUM_FAN_PIN, HIGH);
+
   pinMode(CO2_FAN_IN1, OUTPUT); pinMode(CO2_FAN_IN2, OUTPUT);
   pinMode(ROOF_IN3,    OUTPUT); pinMode(ROOF_IN4,    OUTPUT);
   digitalWrite(CO2_FAN_IN1, LOW); digitalWrite(CO2_FAN_IN2, LOW);
@@ -309,12 +282,9 @@ void setup() {
   pinMode(LIMIT_SW_2_PIN,   INPUT_PULLUP);
   pinMode(MHZ19_PWM_PIN,    INPUT);
   
-  // CẤU HÌNH CẢM BIẾN MỚI
   pinMode(SOIL_PIN, INPUT);
-  analogReadResolution(12); // 12-bit (0-4095)
-  analogSetAttenuation(ADC_11db); // Đọc tối đa 3.3V
-  
-  // Phao từ: Nối COM xuống GND, NO lên GPIO 35. Dùng trở kéo nội bộ
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
   pinMode(FLOAT_PIN, INPUT_PULLUP);
 
   attachInterrupt(digitalPinToInterrupt(MHZ19_PWM_PIN), pwmISR, CHANGE);
@@ -329,10 +299,13 @@ void setup() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println(F("GlassHome booting..."));
+  display.println(F("OLED: SDA21 SCL22"));
   display.display();
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
+  IPAddress ip = WiFi.softAPIP();
+  (void)ip;
 
   display.clearDisplay();
   display.setCursor(0, 0);
@@ -348,9 +321,10 @@ void setup() {
   server.on("/api/latest",   HTTP_GET,  handleLatest);
   server.on("/api/history",  HTTP_GET,  handleHistory);
   server.on("/api/control",  HTTP_POST, handleControl);
-  server.begin();
 
+  server.begin();
   stateMutex = xSemaphoreCreateMutex();
+
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   updateSnapshot();
   xSemaphoreGive(stateMutex);
@@ -358,6 +332,7 @@ void setup() {
   xTaskCreatePinnedToCore(sensorTask, "SensorTask", 8192, NULL, 1, NULL, 0);
 }
 
+// ===== TASK CORE 0 (ÉP XUNG TỐC ĐỘ CAO) =====
 void sensorTask(void *parameter) {
   unsigned long lastLogTime     = 0;
   unsigned long lastDHTRead     = 0;
@@ -365,11 +340,12 @@ void sensorTask(void *parameter) {
   unsigned long lastLogic       = 0;
   unsigned long lastSoilRead    = 0;
 
-  const unsigned long DHT_INTERVAL    = 2000;
-  const unsigned long OLED_INTERVAL   = 200;
-  const unsigned long LOOP_INTERVAL   = 200;
-  const unsigned long LOGIC_INTERVAL  = 200;
-  const unsigned long SOIL_INTERVAL   = 1000;
+  // GIẢM THỜI GIAN LẤY MẪU ĐỂ TĂNG TỐC ĐỘ PHẢN HỒI
+  const unsigned long DHT_INTERVAL    = 2000; // Giới hạn phần cứng DHT22 (ko thể giảm)
+  const unsigned long OLED_INTERVAL   = 100;  // Quét màn hình 10 lần/giây
+  const unsigned long LOOP_INTERVAL   = 50;   // Vòng lặp task siêu mượt 50ms
+  const unsigned long LOGIC_INTERVAL  = 100;  // Kiểm tra điều khiển bơm, rơ le 10 lần/s
+  const unsigned long SOIL_INTERVAL   = 150;  // Đọc đất 6 lần/giây (Tức thời)
 
   int           ldrDebouncePrev = digitalRead(LIGHT_SENSOR_PIN);
   int           ldrDebounceCnt  = 0;
@@ -384,7 +360,7 @@ void sensorTask(void *parameter) {
       g_cachedClients     = WiFi.softAPgetStationNum();
     }
 
-    // 1. DHT22 (Nhiệt độ + Độ ẩm không khí)
+    // 1. ĐỌC DHT22
     if (now - lastDHTRead >= DHT_INTERVAL) {
       lastDHTRead = now;
       float t_raw = dht.readTemperature();
@@ -395,67 +371,62 @@ void sensorTask(void *parameter) {
       xSemaphoreGive(stateMutex);
     }
 
-    // 2. Đọc Đất & Phao
+    // 2. ĐỌC ĐẤT & PHAO TỪ (TỐC ĐỘ CAO)
     if (now - lastSoilRead >= SOIL_INTERVAL) {
       lastSoilRead = now;
-      
-      // Đọc độ ẩm đất (Analog)
       int raw_soil = analogRead(SOIL_PIN);
-      // Map: Khô (3500) -> 0%, Ướt (1200) -> 100%
       int pct = map(raw_soil, SOIL_DRY_VAL, SOIL_WET_VAL, 0, 100);
       if (pct < 0) pct = 0;
       if (pct > 100) pct = 100;
       
-      // Đọc phao từ (Digital)
-      // Có nước = HIGH, Cạn nước = LOW
       bool current_water = (digitalRead(FLOAT_PIN) == HIGH);
       
       xSemaphoreTake(stateMutex, portMAX_DELAY);
-      soil_pct = (float)pct;
+      soil_pct = kalmanSoil.update((float)pct); 
       tank_has_water = current_water;
       xSemaphoreGive(stateMutex);
     }
 
-    // 3. CO2
+    // 3. ĐỌC CO2
     long co2_raw = readCO2PWM();
     if (co2_raw >= 0) {
       bool frozen = (millis() - lastRelayChangeMs) < CO2_FREEZE_MS;
       if (!frozen) {
-        long co2_filtered = co2Filter.push(co2_raw);
-        if (co2_filtered >= 0) {
-          xSemaphoreTake(stateMutex, portMAX_DELAY);
-          co2_k = kalmanCO2.update((float)co2_filtered);
-          xSemaphoreGive(stateMutex);
-        }
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
+        co2_k = kalmanCO2.update((float)co2_raw); 
+        xSemaphoreGive(stateMutex);
       }
     }
 
-    // 4. LDR Debounce
+    // 4. LDR DEBOUNCE (Phản ứng lẹ hơn)
     int ldrRead = digitalRead(LIGHT_SENSOR_PIN);
     bool ldrChanged = false;
+
     if (ldrRead == ldrDebouncePrev) {
       if (ldrDebounceCnt < 2) ldrDebounceCnt++;
     } else {
       ldrDebouncePrev = ldrRead; ldrDebounceCnt  = 0;
     }
+
     if (ldrDebounceCnt >= 2 && ldrRead != ldrStableRaw) {
-      if (now - ldrLastChange >= 1000) {
+      if (now - ldrLastChange >= 200) { // Giảm từ 1000ms xuống 200ms
         ldrStableRaw  = ldrRead; ldrLastChange = now; ldrChanged    = true;
       }
     }
 
-    // 5. Logic & Snapshot
+    // 5. THỰC THI LOGIC
     xSemaphoreTake(stateMutex, portMAX_DELAY);
+
     if ((int)light_raw != ldrStableRaw) {
       light_raw    = ldrStableRaw;
       light_status = (light_raw == LOW) ? "SANG" : "TOI";
     }
+
     if (is_auto_mode && (ldrChanged || (now - lastLogic >= LOGIC_INTERVAL))) {
       lastLogic = now;
       applyAutoLogic();
     }
     else if (!is_auto_mode) {
-      // An toàn: hết nước thì luôn ngắt bơm kể cả ở chế độ thủ công
       if (!tank_has_water && pump_status == "ON") {
         digitalWrite(PUMP_PIN, HIGH); pump_status = "OFF"; lastRelayChangeMs = millis();
       }
@@ -467,10 +438,11 @@ void sensorTask(void *parameter) {
       lastLogTime = millis();
       addHistoryPoint();
     }
+
     updateSnapshot();
     xSemaphoreGive(stateMutex);
 
-    // 6. OLED
+    // 6. OLED HIỂN THỊ
     if (now - lastOLEDDraw >= OLED_INTERVAL) {
       lastOLEDDraw = now;
       xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -494,7 +466,7 @@ void sensorTask(void *parameter) {
       }
       display.drawLine(0, 14, 127, 14, SSD1306_WHITE);
 
-      // NHIỆT ĐỘ & ĐỘ ẨM ĐẤT (Hàng giữa)
+      // HÀNG 2
       display.setTextSize(2);
       char tBuf[8]; snprintf(tBuf, sizeof(tBuf), "%.1f", s.t);
       display.setCursor(2, 16); display.print(tBuf);
@@ -506,7 +478,7 @@ void sensorTask(void *parameter) {
       int sW = strlen(sBuf) * 12;
       display.setCursor(126 - sW, 16); display.print(sBuf);
       
-      // TRẠNG THÁI BỂ NƯỚC & CO2 (Hàng 3)
+      // HÀNG 3
       display.setTextSize(1);
       display.setCursor(0, 34);
       display.print(F("CO2 ")); display.print((int)(s.co2 + 0.5f)); display.print(F("ppm"));
@@ -515,24 +487,25 @@ void sensorTask(void *parameter) {
       if (s.tank_water) {
         display.print(F("NUOC:OK"));
       } else {
-        display.print(F("HET NUOC")); // Cảnh báo hết nước
+        display.print(F("HET NUOC")); 
       }
-      
+      display.drawLine(0, 42, 127, 42, SSD1306_WHITE);
+
+      // HÀNG 4
       display.setCursor(0, 44);
       display.print(F("LDR:")); display.print(s.light_status);
       display.setCursor(70, 44);
       display.print(F("RH:")); display.print((int)(s.hum + 0.5f)); display.print(F("%"));
 
-      // TRẠNG THÁI RELAY (Hàng cuối)
+      // HÀNG 5
       display.setCursor(0, 53);
       display.print(F("BOM:")); display.print(s.pump_status == "ON" ? F("ON") : F("--"));
       display.print(F(" S:")); display.print(s.heat_status == "ON" ? F("ON") : F("--"));
       display.print(F(" Q:")); display.print(s.hum_fan_status == "ON" ? F("ON") : F("--"));
-      display.print(F(" M:")); display.print(s.roof_status);
-
+      
       display.display();
     }
-    vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL));
+    vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL)); // Đã giảm xuống 50ms để bắt tín hiệu nhạy nhất
   }
 }
 
@@ -549,7 +522,6 @@ bool executeHardware(String device, String action) {
   }
   else if (!is_auto_mode) {
     if (device == "pump") {
-      // CHẶN BƠM NẾU HẾT NƯỚC
       if (action == "ON" && tank_has_water) { 
         digitalWrite(PUMP_PIN, LOW);  pump_status = "ON";  lastRelayChangeMs = millis(); 
       }
@@ -597,11 +569,12 @@ void handleLatest() {
 
   JsonDocument doc;
   doc["temperature"] = serialized(String(s.t, 1));
-  doc["co2"]         = (int)s.co2;
   doc["humidity"]    = (int)(s.hum + 0.5f);
+  doc["co2"]         = (int)s.co2;
   doc["soil_pct"]    = (int)s.soil_pct;
   doc["tank"]        = s.tank_water ? "CON" : "HET";
   doc["light"]       = s.light_status;
+  doc["light_raw"]   = s.light_raw;
   doc["mode"]        = s.auto_mode ? "AUTO" : "MANUAL";
   doc["pump"]        = s.pump_status;
   doc["heater"]      = s.heat_status;
