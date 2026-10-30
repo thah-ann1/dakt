@@ -86,7 +86,7 @@ public:
   }
 };
 
-// Đã tinh chỉnh lại hệ số Q rất cao, R rất thấp để cập nhật giá trị TỨC THỜI
+//hệ số Q rất cao, R rất thấp để cập nhật giá trị TỨC THỜI
 KalmanFilter kalmanTemp(2.0, 0.5, 1.0, 22.0); 
 KalmanFilter kalmanHum (2.0, 0.5, 1.0, 70.0);
 KalmanFilter kalmanCO2 (10.0, 1.0, 1.0, 400.0);
@@ -192,10 +192,10 @@ void applyAutoLogic() {
 
   // 3. QUẠT HÚT ẨM
   prev = hum_fan_status;
-  if (hum_k > 85.0 || t_k > 30.0) { 
+  if (hum_k > 80.0 || t_k > 25.0) { 
     digitalWrite(HUM_FAN_PIN, LOW);  hum_fan_status = "ON";  
   }
-  else if (hum_k <= 75.0 && t_k <= 25.0) { 
+  else if (hum_k <= 75.0 && t_k <= 23.0) { 
     digitalWrite(HUM_FAN_PIN, HIGH); hum_fan_status = "OFF"; 
   }
   if (prev != hum_fan_status) lastRelayChangeMs = millis();
@@ -214,10 +214,10 @@ void applyAutoLogic() {
   }
   if (prev != co2_fan_status) lastRelayChangeMs = millis();
 
-  // 5. MÁI CHE
+  // 5. MÁI CHE  -1 dóng, 0 dừng, 1 mở
   int roof_cmd = 0;
-  if      (t_k >= 32.0f)                       roof_cmd = -1; 
-  else if (light_raw == LOW && t_k <= 25.0f)   roof_cmd =  1; 
+  if      (t_k >= TEMP_ROOF_HOT)                        roof_cmd = -1; 
+  else if (light_raw == LOW && t_k <= TEMP_ROOF_COOL)   roof_cmd =  1; 
   else if (light_raw == HIGH)                  roof_cmd = -1; 
   else                                         roof_cmd =  0;
 
