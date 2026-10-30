@@ -214,7 +214,8 @@ void applyAutoLogic() {
   }
   if (prev != co2_fan_status) lastRelayChangeMs = millis();
 
-  // 5. MÁI CHE  -1 dóng, 0 dừng, 1 mở
+  // 5. MÁI CHE  -1 dóng, 0 dừng, 1 mở//  TEMP_ROOF_HOT = 28.0f ( >= 28 -> đóng mái che ),
+  //TEMP_ROOF_COOL = 23.0f   // <= 23 -> cho phép mở lại khi trời sáng
   int roof_cmd = 0;
   if      (t_k >= TEMP_ROOF_HOT)                        roof_cmd = -1; 
   else if (light_raw == LOW && t_k <= TEMP_ROOF_COOL)   roof_cmd =  1; 
