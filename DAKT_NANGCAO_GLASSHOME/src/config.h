@@ -17,8 +17,7 @@ const char* AP_PASS = "12345678";   // Mật khẩu WPA2, TỐI THIỂU 8 KÝ T�
 // ==========================================
 
 // --- Nhiệt độ không khí (°C): tối ưu 18-23 ---
-#define TEMP_HEAT_ON      18.0f   // < 18  -> bật đèn sưởi
-#define TEMP_HEAT_OFF     20.0f   // >= 20 -> tắt đèn sưởi
+
 #define TEMP_COOL_ON      25.0f   // > 25  -> bật quạt thông gió (hút ẩm/làm mát)
 #define TEMP_COOL_OFF     23.0f   // <= 23 -> tắt quạt (nếu ẩm không khí cũng ổn)
 #define TEMP_ROOF_HOT     28.0f   // >= 28 -> đóng mái che (nóng + nắng gắt làm cây còi cọc)
@@ -34,6 +33,5 @@ const char* AP_PASS = "12345678";   // Mật khẩu WPA2, TỐI THIỂU 8 KÝ T�
 
 // --- CO2 (ppm): 700-1000 ---
 #define CO2_LOW_ON        700     // < 700  -> quạt VÀO (bổ sung CO2)
-#define CO2_LOW_OFF       750     // >= 750 -> dừng
 #define CO2_HIGH_ON       1000    // > 1000 -> quạt RA (thải bớt)
-#define CO2_HIGH_OFF      950     // <= 950 -> dừng
+//701-999: quạt dừng (dung)
