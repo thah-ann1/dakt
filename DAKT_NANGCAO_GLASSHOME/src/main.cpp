@@ -89,7 +89,7 @@ public:
 //hệ số Q rất cao, R rất thấp để cập nhật giá trị TỨC THỜI
 KalmanFilter kalmanTemp(2.0, 0.5, 1.0, 22.0); 
 KalmanFilter kalmanHum (2.0, 0.5, 1.0, 70.0);
-KalmanFilter kalmanCO2 (10.0, 1.0, 1.0, 400.0);
+KalmanFilter kalmanCO2 (10.0, 1.0, 1.0, 650.0);
 KalmanFilter kalmanSoil(8.0, 0.1, 1.0, 50.0); // Siêu nhạy với biến động của nước
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
@@ -97,7 +97,7 @@ Adafruit_SSD1306 display(128, 64, &Wire, -1);
 // ===== BIẾN TOÀN CỤC =====
 float  t_k = 22.0;
 float  hum_k = 70.0;
-float  co2_k = 400.0;
+float  co2_k = 650.0;
 float  soil_pct = 50.0;
 bool   tank_has_water = true;
 
@@ -158,7 +158,7 @@ long readCO2PWM() {
   newCO2Data = false;
   interrupts();
   float t_ms = t / 1000.0f;
-  long  ppm  = (long)((t_ms - 2.0) * 2.0);
+  long  ppm  = (long)((t_ms - 2.0) * 5.0);
   if (ppm < 0)    ppm = 0;
   if (ppm > 5000) ppm = 5000;
   return ppm;
